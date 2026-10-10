@@ -1,0 +1,11 @@
+schema_version = "1.0.0"
+id = "r_blmaster"
+version = "1.0.6"
+name = "R_blmaster"
+tagline = "中文材质、动态特效、四边面重拓扑与 STEP 导入导出"
+maintainer = "ERDCX"
+type = "add-on"
+tags = ["Material", "Nodes"]
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 ERDCX"]
