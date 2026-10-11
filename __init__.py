@@ -1,6 +1,73 @@
 # -*- coding: utf-8 -*-
 """R_blmaster — Blender 4.2+ 中文材质、特效与模型 CAD 工具集。"""
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 【教学导读】写给第一次读这份代码的你
+#   本版为「教学注释版」：相对基线提交 20db8ad（= R_blmaster_v1.0.6.zip 正典源码，
+#   __init__.py md5 14fcee83…）【只增注释与 docstring，零逻辑改动】；
+#   需要纯净版时 checkout 基线提交即可逐行对照。
+#
+# 这份文件是什么
+#   一个 Blender 4.2+ 扩展（旧称插件），三大能力板块：
+#   ① 材质：PS 式图层堆栈（混合/遮罩/不透明度）+ 程序化材质工厂 + PBR 贴图导入；
+#   ② 特效：闪电/表面/几何/消散/音频驱动/体积（雾·雨雪·烟·火·液体）等效果层，
+#      全部走「创建面板参数 → update 回调实时驱动节点/修改器」的同一套机制；
+#   ③ 模型 CAD：网格 ↔ STEP 导入导出（Part21 写出器）、四边形重拓扑、共面融合。
+#
+# 三条阅读路线（按目的选）
+#   · 想懂「拖滑块为什么实时生效、又为什么偶尔被打回」→ 读「核心机制 A」，
+#     再读 update_layer_values / _sync_layer_panel_value / update_layer_opacity。
+#   · 想加一种新特效 → 读「核心机制 B」+ 任意一个 MFX_OT_volume_* 操作符
+#     + register_effect_layer。
+#   · 想懂 STEP 导出 → 读「核心机制 D」+ MFX_Part21Writer / step_coplanar_faces。
+#
+# 核心机制 A：update 回调与守卫哨兵（全文件最精要的一课）
+#   Blender 的属性可挂 update=回调：用户在面板【每拖一帧】都会触发，于是
+#   「实时调节」是天然的；危险在于【双向同步】——
+#     面板 → 层：update_layer_values 把面板参数写进节点（正向，天然实时）；
+#     层 → 面板：行条目改层值后要回填面板读数，但「写面板属性」本身又会触发
+#     update 回调 → 不拦截的话，层值会被【面板里滞后的旧值】打回（v1.0.5 实证
+#     事故：层强度 0.4→0.5 被面板滞后值打回 0.4），或形成无限回环。
+#   解法是两个哨兵 dict（_MFX_REPLAY_GUARD / _LIVE_SYNC_GUARD）：回写前置
+#   active=True，finally 必复位；所有 update 回调入口先查哨兵再动手。
+#   v1.0.6 修复点：update_layer_values 的拦截条件从只查 _MFX_REPLAY_GUARD 扩为
+#   「or _LIVE_SYNC_GUARD["active"]」，与同族先例 update_layer_opacity 对齐。
+#
+# 核心机制 B：特效层生命周期
+#   register_effect_layer 登记（layer_id=uuid；节点/物体/集合/修改器打
+#   mfx_effect_layer_id 自定义属性，双向可索引）→ update_*_live 家族实时改参
+#   （socket / 修改器输入 / 关键帧重映射）→ 删除操作符按 id 标记拆链清理。
+#
+# 核心机制 C：材质图层链（PS 式）
+#   wire_layer 是唯一接线实现：每层 = Principled(本层) + Mix(PS 式颜色混合，
+#   A=下层色链 / B=本层色) + 可选遮罩链 + 强度 ColorRamp；层与层用 prev_chain
+#   dict 串成链表，函数内「A 端三变体」注释是理解嵌套混合的钥匙。
+#
+# 核心机制 D：模型 CAD 线
+#   导出：step_mesh_data 取评估网格 → step_coplanar_faces 共面融合（BFS 聚类、
+#   种子平面锚定防漂移）→ MFX_Part21Writer 按 ISO-10303-21 逐实体写出（×1000 转 mm）；
+#   导入：parse_faceted_step 手写解析 → 顶点去重 / T 结点钉扎 → 建 Blender 网格。
+#
+# 板块目录（无行号——注释会使行号漂移，请用标识符全局搜索定位；按出现顺序）
+#   [基础设施] rebuild_preset_items / load_preview_icons / set_input 等小工具
+#   [面板↔层同步] _layer_edit_target / sync_layer_nodes / sync_layer_panel /
+#                update_layer_wiring / update_layer_values（v1.0.6 修复点）
+#   [实时调节·双向联动] _LIVE_SYNC_GUARD 哨兵 + update_*_live 回调全家族
+#   [行条目回写链] _mirror_panel_to_layers / update_layer_row_value / _row_color / _opacity
+#   [材质工厂] make_texture_material / apply_texture_preset / make_material
+#   [投影形式] mfx_projection_socket / retarget_mfx_projections（GENERATED/OBJECT/WORLD）
+#   [连线引擎] wire_layer / can_detach / detach / snapshot / replay_layer_chain
+#   [数据模型] MFX_Preferences / MFX_MaterialLayer / MFX_EffectLayer 等属性组
+#   [层管理操作符] add / update / remove / select / move / clear_orphans / apply_preset
+#   [特效操作符] lightning / pbr 导入 / dissolve / energy_flow / surface / geometry /
+#               fracture / volume 系列 / audio_drive / bake / export
+#   [模型 CAD] import_model / quad_remesh / export_step / MFX_Part21Writer /
+#             step_coplanar_faces / parse_faceted_step
+#   [预设与团队] import_preset / save_preset / mark_asset / team_pack
+#   [UI 面板] MFX_PT_* 家族（N 面板「R_blmaster」分类）
+#   [生命周期] register / unregister
+# ═══════════════════════════════════════════════════════════════════════════════
+
 bl_info = {
     "name": "R_blmaster",
     "author": "ERDCX",
@@ -97,6 +164,12 @@ DEFAULT_PRESET_ITEMS = ()
 CUSTOM_PRESET_ITEMS = ()
 NO_PRESET_ITEMS = (("NO_PRESET_MATCH", "没有匹配的预设", "请修改搜索词或收藏筛选", 0, 0),)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [基础设施层] 预设枚举刷新 / 图标预载 / 通用小工具。
+# 教学点：rebuild_preset_items 挂 bpy.app.timers 延迟一拍执行——注册期 bpy.data
+# 尚不可靠（见 register() 内原注释），「先注册、后补扫」是 Blender 扩展的
+# 标准起手式；load_post 处理器再负责每次开文件后的重扫（见 _mfx_on_load_post）。
 
 def rebuild_preset_items():
     global PRESET_ITEMS_BY_CATEGORY, DEFAULT_PRESET_ITEMS, CUSTOM_PRESET_ITEMS
@@ -280,6 +353,18 @@ def layer_is_orphan(layer):
     return not material or not material.node_tree.nodes.get(layer.blend_node)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [面板↔层同步核心] 材质图层编辑的五个关键函数，分工如下：
+#   _layer_edit_target —— 「当前在编辑谁」的唯一裁决：活动物体须有节点材质，
+#       行索引须在界内，且该层必须真属于活动材质（防残留条目串台）。
+#   sync_layer_nodes   —— 正向·改节点：直接更新已有节点的 socket 值，避免拖动
+#       时反复拆建整棵链（性能与视图稳定性的关键取舍）。
+#   sync_layer_panel   —— 反向·改面板：选中行后把面板控件刷成本层参数；全程举着
+#       _MFX_REPLAY_GUARD 哨兵，防止回填动作反向触发 update 回调。
+#   update_layer_wiring —— 结构性变更（换遮罩类型等）才走整链重建。
+#   update_layer_values —— 数值性变更（颜色/粗糙度/强度/不透明度）走软更新。
+#   教学点：「软更新优先、重建兜底」是节点式扩展的通用性能心法。
+
 def _layer_edit_target(context):
     """取「面板参数可编辑」的当前选中图层：必须归属当前活动材质（残留条目返回 None）。"""
     obj = context.object
@@ -364,7 +449,18 @@ def update_layer_wiring(props, context):
 
 
 def update_layer_values(props, context):
-    """面板颜色/粗糙度/遮罩/不透明度变更：只更新当前层相关节点。"""
+    """面板颜色/粗糙度/遮罩/不透明度变更：只更新当前层相关节点。
+
+    教学注（v1.0.6 修复点）：本函数是「面板 → 层」的正向入口，被 layer_color /
+    layer_roughness / layer_strength / layer_pattern_scale / layer_opacity 等
+    面板属性的 update= 挂载，拖动滑块时 Blender 每帧调用一次。若此刻正处于
+    「层 → 面板」回填（_LIVE_SYNC_GUARD 活跃，例如行强度滑块回填面板读数），
+    面板里躺着的还是【滞后旧值】，任由本函数执行就会把层打回旧值——即 v1.0.5
+    的「回弹」事故（实证：层强度 0.4→0.5 被面板滞后值 0.4 打回，对照组正向
+    0.8 正常）。修法 = 拦截条件补查 _LIVE_SYNC_GUARD，与同族先例
+    update_layer_opacity 对齐：「谁在回填，谁举哨兵；所有正向入口，先看哨兵
+    再动手」。
+    """
     if _MFX_REPLAY_GUARD["active"] or _LIVE_SYNC_GUARD["active"]:  # v1.0.6：行值回填期间用面板滞后值回写层会回弹，需一并拦截
         return
     layer = _layer_edit_target(context)
@@ -392,6 +488,14 @@ def update_layer_values(props, context):
 # 2) 图层堆栈参数改动 → 反向回填面板读数（_LIVE_SYNC_GUARD 防回环，先例 _MFX_REPLAY_GUARD）；
 # 3) 结构类参数（拓扑/种子/数量类）保留「重新添加生效」语义，tooltip 已标注，不硬扛引擎机制；
 # 4) 模拟分辨率/时长改动 → 失效旧缓存 + 去抖 0.8s 自动重烘焙（timer 驱动，不冻 UI）。
+
+# [哨兵 101] 为什么是 dict 而不是 bool：字典是可变对象，函数内 guard["active"]=True
+#   改的是同一个对象，无需 global 声明——全文件哨兵的统一写法。配套纪律：置位与
+#   复位必须 try/finally 包夹，回填中途抛异常也绝不把哨兵留在 True，否则面板
+#   永久失灵。「回弹」故障模型：面板(旧值) --update--> 层 ← 回填方想写(新值)；
+#   层(新) --回填--> 面板(仍显旧值) --update--> 层被打回(旧)。两个哨兵分工：
+#   _MFX_REPLAY_GUARD 管「选中行后的面板整体重刷」，_LIVE_SYNC_GUARD 管
+#   「实时调节期间的字段级回填」；v1.0.6 起正向入口两边都查。
 
 _LIVE_SYNC_GUARD = {"active": False}
 _VOLUME_BAKE_PENDING = {"timer": None}
@@ -1089,6 +1193,16 @@ def update_layer_row_value(layer, context):
         context.area.tag_redraw()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [行条目回写链] 图层堆栈 UI 行上的控件改层值后的「先改层、再回填面板」三兄弟
+# ——回填前必举哨兵，否则面板 update 回调会把层打回：
+#   update_layer_row_value —— 行强度 → 层，回填面板 layer_strength；
+#   update_layer_row_color —— 行颜色 → 层色节点，回填面板 layer_color；
+#       （v1.0.5 归因实证：面板 layer_color 的 RNA update 正是
+#       update_layer_values，行回写会触发它——「回写路径存在」由此坐实）
+#   update_layer_opacity  —— 行不透明度 → 层；同族先例：除 _MFX_REPLAY_GUARD
+#       外还查 _LIVE_SYNC_GUARD，v1.0.6 修复即向它对齐。
+
 def update_layer_row_color(layer, context):
     """图层行颜色块变更：直接刷新该层颜色节点。"""
     if _MFX_REPLAY_GUARD["active"]:
@@ -1248,6 +1362,16 @@ def apply_texture_preset(operator, context, targets, tex):
     operator.report({'INFO'}, f"已应用贴图材质：{name}")
     return True
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [材质工厂] make_material：程序化材质「装配线」教学样本。
+#   固定骨架：输出 ← Principled BSDF，Base Color/Roughness/Metallic 参数直填；
+#   质感层：噪声 Fac 经 MapRange 收敛到「目标粗糙度 ±0.12」窄带再进 Roughness
+#   ——「参数定中心、噪声做扰动」是程序化材质不脏面的关键手法；
+#   风格层：style 切换图案源（brushed=定向 Wave 拉丝 / wood=年轮…），只替换
+#   pattern_height 一根线、骨架不动——「换图案源不换骨架」的可扩展设计；
+#   投影层：texcoord["mfx_projection"] 把投影模式持久化为节点自定义属性，
+#   自定义属性随 .blend 落盘，开旧文件零重放也能保持观感一致。
 
 def make_material(name, color, roughness, metallic, bump_strength=0.12, noise_scale=12.0, style="noise", projection_mode=None):
     """程序化纹理投影形式（方案 §2.1/§3）：程序化纹理链的投影坐标全局枚举
@@ -1946,6 +2070,18 @@ def _axis_support(bounds, direction):
     return bounds.x * abs(direction.x) + bounds.y * abs(direction.y) + bounds.z * abs(direction.z)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [连线引擎] wire_layer：全扩展唯一接线实现——新层创建与整链重放共用它，
+# 保证「单次创建」与「批量重建」结果一致（教学点：把「怎么接」收敛到一个
+# 函数，是节点式扩展防状态分裂的顶层设计）。
+# 链式数据流（PS 式图层 = 画家算法的着色器版）：
+#   下层 color_mix.Result ──A(底色)──┐
+#   本层 params["color"]  ──B(顶色)──┤ Mix(PS式混合) ──Result──▶ 本层
+#   Principled.BaseColor；遮罩链 Fac ▶ 强度 ColorRamp（覆盖范围）▶ Mix.Factor。
+# prev_chain dict 是「上一层的记忆」：color_mix=可链的混合节点 / fallback_socket=
+# 结构缺失时的退路 / base_color=完全不建链时直接抄的值；函数内「A 端三变体」
+# 逐一兜底，让任意历史版本的层都能接上新层。
+
 def wire_layer(nt, source_socket, old_target, params, prev_chain, label_index):
     """创建一层完整节点链并接线（add_layer 与整链重放共用的唯一接线实现，v0.9.4 §三）。
     params: dict(blend_mode, mask_type, mask_direction, color, roughness, strength, pattern_scale)
@@ -2447,6 +2583,15 @@ class MFX_EffectLayer(PropertyGroup):
     loop_mode: EnumProperty(name="循环", items=[("NONE", "不循环", "只播放一次"), ("REPEAT", "重复", "重复播放"), ("MIRROR", "往返", "往返播放"), ("REPEAT_OFFSET", "累积重复", "重复时累加曲线变化")], default="NONE", update=update_effect_layer_animation)
     easing: EnumProperty(name="缓动", items=[("KEEP", "默认", "保留特效原有插值"), ("BEZIER", "柔和", "自动贝塞尔缓动"), ("LINEAR", "线性", "匀速变化"), ("CONSTANT", "跳变", "阶梯跳变"), ("SINE", "正弦", "正弦缓动"), ("QUAD", "二次", "二次缓动")], default="KEEP", update=update_effect_layer_animation)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [层登记·ID 标记体系] register_effect_layer：特效层的「出生证明」。
+#   双向索引设计——层对象里存节点名等字符串字段（层 → 节点），同时给节点、物体、
+#   集合、修改器打 ["mfx_effect_layer_id"]=uuid 自定义属性（节点 → 层）；
+#   删除时靠标记反查拆链，改参时靠层字段直达节点，两向都是 O(1) 定位。
+#   兼容注意：GN 修改器支持自定义属性，FluidModifier 等类型不支持（TypeError
+#   捕获后退化），volume 层改用对象级标记关联——不是遗漏，是 Blender 类型差异
+#   的现实约束（见函数内原注释）。
 
 def register_effect_layer(scene, name, effect_type, obj=None, collection=None, material=None,
                           root=None, emission=None, mask=None, strength=4.0,
@@ -3903,6 +4048,13 @@ class MFX_OT_delete_effect_layer(Operator):
 VOLUME_EFFECT_TYPES = {"VOLUME_FOG", "VOLUME_BEAMS", "VOLUME_SMOKE", "VOLUME_FIRE", "VOLUME_LIQUID", "RAIN", "SNOW"}
 
 
+# [体积特效] 教学补注：本板块统一走「域对象(Domain) + 修改器」路线——先建带
+# 边界补偿的域物体（_volume_domain_object，pad 参数防流体穿帮），效果由修改器/
+# 流体设置驱动，登记收口在 _volume_finish_register；实时性由 update_*_live 改
+# 修改器输入实现；分辨率/时长类参数改动 → 失效缓存 + 0.8s 去抖 timer 重烘焙
+# （_volume_bake_timer / _VOLUME_BAKE_PENDING），烘焙进度经 _volume_bake_state_text
+# 画进面板，全程不阻塞 UI 线程。
+
 def volume_direction_vector(p):
     """DX-5.2 方向解析：NATURAL=原生(None)；六轴=单位向量；CUSTOM=沿用 v1.0.1 既有换算约定
     （方位角自 X 轴向 Y、俯仰自水平面起算，与 _direction_vector 同源，CUSTOM(45,30)→(0.6124,0.6124,0.5)）。"""
@@ -5018,6 +5170,16 @@ def step_number(value):
     return format(value, ".12g")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [CAD·STEP 写出器] MFX_Part21Writer：手写 ISO-10303-21（STEP Part 21）实体写出器。
+#   格式一课：STEP 主体是「#N=实体类型(参数);」的实体表，拓扑自底向上——
+#   CARTESIAN_POINT（坐标 ×1000：Blender 米 → STEP 毫米）→ DIRECTION → 面环 →
+#   EDGE/PLANE → ADVANCED_FACE → CLOSED_SHELL → MANIFOLD_SOLID_BREP；
+#   add() 自增发号并返回 id，各方法返回 id 供上层引用，实体间构成引用图。
+#   鲁棒性两件套：_loop_normal 用 Newell 法求非凸平面环法线（比单边叉积稳健）；
+#   _collect_pins 用空间哈希分桶找 T 型连接（外部顶点落在面边上）——漏掉钉扎
+#   会让相邻面共享边断开，CAD 软件报拓扑错误。零 numpy 依赖，任何发行版可用。
+
 class MFX_Part21Writer:
     def __init__(self):
         self.entities = []
@@ -5266,6 +5428,10 @@ def step_coplanar_faces(vertices, faces, angle_rad, diagonal):
             edge_faces.setdefault(key, []).append(index)
 
     # BFS 聚类：种子按面积降序（规格 §3.1），参考平面固定为种子平面，防链式漂移
+    #   教学补注：若每并入邻居就改用邻居平面做判定，A 贴 B、B 贴 C…长链累积
+    #   角度误差，走到链尾平面可能肉眼可见地歪（链式漂移）；锚定种子平面 =
+    #   全体成员跟同一基准比，聚类边界稳定可复现。法向夹角（angle_cos）与
+    #   平面距离（dist_tol）双阈值联合判定，「共面」才算数。
     cluster_of = [-1] * tri_count
     clusters = []
     seed_order = sorted((index for index in range(tri_count) if normals[index] is not None), key=lambda i: (-areas[i], i))
@@ -5925,6 +6091,13 @@ class MFX_OT_import_blend_preset(Operator, ImportHelper):
         return {'FINISHED'}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [UI 面板] MFX_PT_* 家族：N 面板「R_blmaster」分类下的一组 Panel。
+#   教学点：bl_space_type/bl_region_type 决定挂载位置（VIEW_3D+UI=N 面板），
+#   bl_category 定分类名，子面板经 bl_parent_id 归组折叠；draw() 每帧重画、
+#   只读 context 不缓存布局——Blender UI 是即时模式（immediate mode），
+#   「布局即状态、重画即刷新」与常规 GUI 框架的保留模式截然不同。
+
 class MFX_PT_material(Panel):
     bl_label = "材质"
     bl_idname = "MFX_PT_material"
@@ -6339,6 +6512,14 @@ CLASSES = (MFX_Favorite, MFX_Recent, MFX_MaterialLayer, MFX_EffectLayer, MFX_Pre
            MFX_PT_material, MFX_PT_mat_layers, MFX_PT_mat_manage, MFX_PT_mat_texture,
            MFX_PT_effects, MFX_PT_fx_lightning, MFX_PT_fx_surface, MFX_PT_fx_geometry,
            MFX_PT_fx_dissolve, MFX_PT_fx_audio, MFX_PT_fx_volume, MFX_PT_model)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [生命周期] register/unregister：扩展的装载与卸载。
+#   register：类批量注册 → Scene 挂 4 个 CollectionProperty + 1 个 PointerProperty
+#   + 索引 IntProperty（扩展全部运行时状态都挂 Scene，随 .blend 存取）→
+#   timer 补扫团队预设 → load_post 挂钩。unregister 严格逆序（del 属性、逆序
+#   注销类、释放图标集合）——教学点：卸载不对称会在「重载扩展」时留幽灵属性
+#   与重复注册类，Blender 控制台报 Warning 的根源多在此。
 
 def register():
     load_preview_icons()
